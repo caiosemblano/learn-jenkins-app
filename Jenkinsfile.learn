@@ -2,21 +2,21 @@ node {
     stage('Checkout') {
         checkout scm
     }
+    nodejs(nodejsInstallation: 'nodejs-lts') {
+        stage('Install dependencies') {
+            bat 'npm ci'
+        }
 
-    stage('Install dependencies') {
-        bat 'npm ci'
-    }
+        stage('Unit tests') {
+            withEnv(['CI=true']) {
+                bat 'npm test -- --watchAll=false'
+            }
+        }
 
-    stage('Unit tests') {
-        withEnv(['CI=true']) {
-            bat 'npm test -- --watchAll=false'
+        stage('Build') {
+            bat 'npm run build'
         }
     }
-
-    stage('Build') {
-        bat 'npm run build'
-    }
-
     stage('JUnit report') {
         junit testResults: 'test-results/junit.xml', allowEmptyResults: false
     }
