@@ -1,0 +1,25 @@
+node {
+    stage('Checkout') {
+        checkout scm
+    }
+
+    stage('Install dependencies') {
+        sh 'npm ci'
+    }
+
+    stage('Unit tests') {
+        sh 'CI=true npm test -- --watchAll=false'
+    }
+
+    stage('Build') {
+        sh 'npm run build'
+    }
+
+    stage('JUnit report') {
+        junit testResults: 'test-results/junit.xml', allowEmptyResults: false
+    }
+
+    stage('Archive build') {
+        archiveArtifacts artifacts: 'build/**', fingerprint: true, onlyIfSuccessful: true
+    }
+}
