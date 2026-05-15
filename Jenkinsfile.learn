@@ -4,15 +4,29 @@ node {
     }
 
     stage('Install dependencies') {
-        sh 'npm ci'
+        if (isUnix()) {
+            sh 'npm ci'
+        } else {
+            bat 'npm ci'
+        }
     }
 
     stage('Unit tests') {
-        sh 'CI=true npm test -- --watchAll=false'
+        if (isUnix()) {
+            sh 'CI=true npm test -- --watchAll=false'
+        } else {
+            withEnv(['CI=true']) {
+                bat 'npm test -- --watchAll=false'
+            }
+        }
     }
 
     stage('Build') {
-        sh 'npm run build'
+        if (isUnix()) {
+            sh 'npm run build'
+        } else {
+            bat 'npm run build'
+        }
     }
 
     stage('JUnit report') {
