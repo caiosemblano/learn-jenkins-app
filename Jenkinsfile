@@ -30,7 +30,7 @@ pipeline {
                 bat '''
                     npm install serve
                     npx playwright install chromium
-                    npx playwright test
+                    npx playwright test --reporter=html
                 '''
             }
         }
