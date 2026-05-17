@@ -37,6 +37,12 @@ pipeline {
                 }
             }
         }
+
+        stage('Deploy') {
+            steps {
+                bat 'echo "Deploying application..."'
+            }
+        }
     }
 
     post {
