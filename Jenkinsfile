@@ -16,22 +16,25 @@ pipeline {
                 '''
             }
         }
+        stage('Run Tests') {
+            parallel {
+                stage('Test') {
+                    steps {
+                        bat '''
+                            npm test -- --passWithNoTests
+                        '''
+                    }
+                }
 
-        stage('Test') {
-            steps {
-                bat '''
-                    npm test -- --passWithNoTests
-                '''
-            }
-        }
-
-        stage('E2E') {
-            steps {
-                bat '''
-                    npm install serve
-                    npx playwright install chromium
-                    npx playwright test --reporter=html
-                '''
+                stage('E2E') {
+                    steps {
+                        bat '''
+                            npm install serve
+                            npx playwright install chromium
+                            npx playwright test --reporter=html
+                        '''
+                    }
+                }
             }
         }
     }
