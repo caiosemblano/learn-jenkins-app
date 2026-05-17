@@ -8,24 +8,30 @@ pipeline {
     stages {
         stage('Build') {
             steps {
-                bat 'node --version'
-                bat 'npm --version'
-                bat 'npm ci'
-                bat 'npm run build'
+                bat '''
+                    node --version
+                    npm --version
+                    npm ci
+                    npm run build
+                '''
             }
         }
 
         stage('Test') {
             steps {
-                bat 'npm test -- --passWithNoTests'
+                bat '''
+                    npm test -- --passWithNoTests
+                '''
             }
         }
 
         stage('E2E') {
             steps {
-                bat 'npm install serve'
-                bat 'npx playwright install chromium'
-                bat 'npx playwright test'
+                bat '''
+                    npm install serve
+                    npx playwright install chromium
+                    npx playwright test
+                '''
             }
         }
     }
