@@ -1,0 +1,285 @@
+/*
+ * AuthPoint Logon App — Jenkins Pipeline (Windows)
+ *
+ * Product   : AuthPoint Logon App for Windows
+ * Team      : (confirm with team)
+ *
+ * OS scope (64-bit) : Windows 10, Windows 11, Server 2012 R2, 2016, 2019, 2022, 2025
+ * OS scope (32-bit) : Windows 10, Server 2012 R2, Server 2016
+ * App version       : 4.0.1 (as of April 2026)
+ * Source            : https://www.watchguard.com/support/release-notes/Cloud/Content/en-US/AuthPoint/OS-compatibility_authpoint.html
+ *
+ * NOTE: The Logon app does not support Windows Core servers or ARM processors.
+ *
+ * Parameters
+ * ----------
+ * WIN_ARCH         (choice)  : 64-bit | 32-bit
+ * OS_VERSION       (choice)  : Windows 10 | Windows 11 | Windows Server 2019 | ...
+ * ENVIRONMENT      (choice)  : QA | STAGING | PROD
+ * REGION           (choice)  : USA | JPN | DEU
+ * SUITE            (choice)  : SMOKE | REGRESSION
+ * BRANCH           (string)  : git branch for the Logon App test repository
+ * PUBLISH_TESTRAIL (boolean) : push results to TestRail when true
+ * MAILTO           (string)  : comma-separated failure notification recipients
+ *
+ * Agent label: windows_logon_auto
+ *   NOTE: Confirm the actual Jenkins node label with the team.
+ *         The agent must be a Windows machine with the test framework installed.
+ *         If tests run on different OS versions via VMs or containers, adjust accordingly.
+ *
+ * WIN_ARCH note: 32-bit only supports Windows 10, Server 2012 R2, and Server 2016.
+ *   Validation is delegated to run_tests.bat; pass WIN_ARCH as a flag so the wrapper
+ *   can abort early if an unsupported OS/arch combination is requested.
+ */
+
+def AGENT_LABEL = 'windows_logon_auto'
+
+def runLogonTests(String agentLabel) {
+    node(agentLabel) {
+        timeout(time: 60, unit: 'MINUTES') {
+
+            stage('Cleanup') {
+                bat 'if exist "%WORKSPACE%\\*" rmdir /S /Q "%WORKSPACE%" 2>nul & exit /b 0'
+            }
+
+            stage('Job creation') {
+                script {
+                    def displayLabel = params.ENVIRONMENT == 'PROD'
+                        ? "#${BUILD_NUMBER} | Env: ${params.ENVIRONMENT} | Reg: ${params.REGION} | Arch: ${params.WIN_ARCH} | OS: ${params.OS_VERSION} | Suite: ${params.SUITE} | Branch: ${params.BRANCH}"
+                        : "#${BUILD_NUMBER} | Env: ${params.ENVIRONMENT} | Arch: ${params.WIN_ARCH} | OS: ${params.OS_VERSION} | Suite: ${params.SUITE} | Branch: ${params.BRANCH} | TestRail: ${params.PUBLISH_TESTRAIL}"
+                    currentBuild.displayName = displayLabel
+
+                    retry(count: 3) {
+                        checkout scm
+                    }
+                }
+            }
+
+            stage('Checkout Tools repo') {
+                bat 'if not exist Tools mkdir Tools'
+                dir('Tools') {
+                    checkout scmGit(
+                        branches: [[name: 'master']],
+                        extensions: [[$class: 'CloneOption', shallow: true, noTags: false, reference: '', depth: 1]],
+                        userRemoteConfigs: [[credentialsId: 'GitCredentials', url: 'https://github.infra.int.daas-watchguard.com/Team-QA/Tools.git']]
+                    )
+                }
+            }
+
+            stage('Test and Reports') {
+                script {
+                    try {
+                        withCredentials([
+                            usernamePassword(credentialsId: 'AUTHPOINT_LOGON_QA',     usernameVariable: 'LOGON_QA_USR',     passwordVariable: 'LOGON_QA_PSW'),
+                            usernamePassword(credentialsId: 'AUTHPOINT_LOGON_QA_JPN', usernameVariable: 'LOGON_QA_JPN_USR', passwordVariable: 'LOGON_QA_JPN_PSW'),
+                            usernamePassword(credentialsId: 'AUTHPOINT_LOGON_QA_DEU', usernameVariable: 'LOGON_QA_DEU_USR', passwordVariable: 'LOGON_QA_DEU_PSW'),
+                            usernamePassword(credentialsId: 'AUTHPOINT_LOGON_QA_USA', usernameVariable: 'LOGON_QA_USA_USR', passwordVariable: 'LOGON_QA_USA_PSW'),
+                        ]) {
+                            withEnv([
+                                "ENVIRONMENT=${params.ENVIRONMENT}",
+                                "REGION=${params.REGION}",
+                                "SUITE=${params.SUITE}",
+                                "BRANCH=${params.BRANCH}",
+                                "WIN_ARCH=${params.WIN_ARCH}",
+                                "OS_VERSION=${params.OS_VERSION}",
+                            ]) {
+                                bat """
+                                    echo --- Running Windows Logon App tests
+                                    echo     Arch: %WIN_ARCH% ^| OS: %OS_VERSION% ^| Env: %ENVIRONMENT% ^| Region: %REGION% ^| Suite: %SUITE% ^| Branch: %BRANCH%
+                                    call run_tests.bat ^
+                                        --arch "%WIN_ARCH%" ^
+                                        --os-version "%OS_VERSION%" ^
+                                        --environment "%ENVIRONMENT%" ^
+                                        --region "%REGION%" ^
+                                        --suite "%SUITE%" ^
+                                        --branch "%BRANCH%" ^
+                                        --username "%LOGON_QA_USR%" ^
+                                        --password "%LOGON_QA_PSW%"
+                                """
+                            }
+                        }
+                    } finally {
+                        try {
+                            bat '''
+                                if exist allure-results (
+                                    dir /b allure-results 2>nul | findstr . >nul && npm run logon:report || echo No Allure results found -- skipping report generation.
+                                ) else (
+                                    echo No allure-results directory -- skipping report generation.
+                                )
+                            '''
+                            archiveArtifacts artifacts: 'target\\*.xml,allure*\\*.png', allowEmptyArchive: true
+                        } catch (e) {
+                            println "Allure artifact archiving failed: ${e}"
+                        }
+                        try {
+                            allure report: 'allure-reports', results: [[path: 'allure*']]
+                        } catch (e) {
+                            println "Allure publish failed: ${e}"
+                        }
+                    }
+                }
+            }
+
+            stage('Publish JUnit Results') {
+                junit allowEmptyResults: true, testResults: 'target\\*.xml'
+            }
+
+            stage('Publish Results to TestRail') {
+                script {
+                    if ("${params.PUBLISH_TESTRAIL}" == 'true') {
+                        withCredentials([string(credentialsId: 'TESTRAIL_API', variable: 'TESTRAIL_API')]) {
+                            bat 'pip install trcli'
+                            echo 'Generating TestRail result file'
+                            bat "Tools\\postman_tools\\testrail_integration\\summarize_junit.bat target\\ testrail_results.xml LOGON_WIN"
+
+                            def TEST_SUITE = params.SUITE == 'SMOKE' ? 'SMOKE_TEST' : 'REGRESSION_TEST'
+
+                            echo "Identify Test Suite: testrail_mapping.py TESTSUITE LOGON_WIN ${TEST_SUITE} ${params.ENVIRONMENT} ${params.REGION}"
+                            def TESTRAIL_TESTSUITE = bat(
+                                script: "python Tools\\postman_tools\\testrail_integration\\testrail_mapping.py TESTSUITE LOGON_WIN ${TEST_SUITE} ${params.ENVIRONMENT} ${params.REGION}",
+                                returnStdout: true
+                            ).trim()
+
+                            echo "Identify Test Run: testrail_mapping.py TESTRUN LOGON_WIN ${TEST_SUITE} ${params.ENVIRONMENT} ${params.REGION}"
+                            def TESTRAIL_TESTRUN = bat(
+                                script: "python Tools\\postman_tools\\testrail_integration\\testrail_mapping.py TESTRUN LOGON_WIN ${TEST_SUITE} ${params.ENVIRONMENT} ${params.REGION}",
+                                returnStdout: true
+                            ).trim()
+
+                            echo "Identify Milestone: testrail_mapping.py MILESTONE LOGON_WIN ${TEST_SUITE} ${params.ENVIRONMENT} ${params.REGION}"
+                            def TESTRAIL_MILESTONE = bat(
+                                script: "python Tools\\postman_tools\\testrail_integration\\testrail_mapping.py MILESTONE LOGON_WIN ${TEST_SUITE} ${params.ENVIRONMENT} ${params.REGION}",
+                                returnStdout: true
+                            ).trim()
+
+                            echo "Uploading to TestRail (suite: ${TESTRAIL_TESTSUITE}, run: ${TESTRAIL_TESTRUN})"
+                            withEnv([
+                                "TESTRAIL_TESTSUITE=${TESTRAIL_TESTSUITE}",
+                                "TESTRAIL_TESTRUN=${TESTRAIL_TESTRUN}",
+                                "TEST_SUITE=${TEST_SUITE}",
+                                "TEST_ENV=${params.ENVIRONMENT}",
+                                "TEST_REGION=${params.REGION}",
+                                "TESTRAIL_MILESTONE=${TESTRAIL_MILESTONE}",
+                            ]) {
+                                bat """
+                                    trcli -y ^
+                                        -h https://watchguardqa.testrail.io ^
+                                        --project "WGC Automation" ^
+                                        --username wats-ng-dev@watchguard.com ^
+                                        -k %TESTRAIL_API% ^
+                                        parse_junit ^
+                                        --title "Logon Windows - %TEST_SUITE% - %TEST_ENV% - %TEST_REGION%" ^
+                                        -f testrail_results.xml ^
+                                        --suite-id "%TESTRAIL_TESTSUITE%" ^
+                                        --run-id "%TESTRAIL_TESTRUN%" ^
+                                        --milestone-id "%TESTRAIL_MILESTONE%"
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+
+            stage('Publish Email Report') {
+                bat """
+                    python custom_job\\generate_email_template.py ^
+                        --junit-dir target ^
+                        --output target\\email_report.html ^
+                        --current-summary target\\results_summary.json ^
+                        --feature "Logon Windows ${params.WIN_ARCH} ${params.SUITE}-${params.ENVIRONMENT}" ^
+                        --job-name %JOB_NAME% ^
+                        --build-number %BUILD_NUMBER% ^
+                        --build-url %BUILD_URL%
+                """
+                archiveArtifacts artifacts: 'target\\results_summary.json,target\\email_report.html', fingerprint: true
+                publishHTML([
+                    allowMissing: false,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'target',
+                    reportFiles: 'email_report.html',
+                    reportName: 'Logon Windows Test Summary Report'
+                ])
+                script {
+                    if (currentBuild.result == 'FAILURE' && params.MAILTO?.trim()) {
+                        emailext(
+                            subject: "[FAILURE] ${env.JOB_NAME} #${env.BUILD_NUMBER} — ${params.WIN_ARCH} | ${params.OS_VERSION} | ${params.ENVIRONMENT} | ${params.SUITE}",
+                            body: """
+                                <p>The AuthPoint Logon App (Windows) automated test run has failed.</p>
+                                <ul>
+                                    <li><b>Architecture:</b> ${params.WIN_ARCH}</li>
+                                    <li><b>OS Version:</b> ${params.OS_VERSION}</li>
+                                    <li><b>Environment:</b> ${params.ENVIRONMENT}</li>
+                                    <li><b>Region:</b> ${params.REGION}</li>
+                                    <li><b>Suite:</b> ${params.SUITE}</li>
+                                    <li><b>Branch:</b> ${params.BRANCH}</li>
+                                    <li><b>Build URL:</b> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></li>
+                                </ul>
+                            """,
+                            mimeType: 'text/html',
+                            to: params.MAILTO
+                        )
+                    }
+                }
+            }
+
+        } // end timeout
+    } // end node
+}
+
+// ── Pipeline entry point ─────────────────────────────────────────────────────
+
+properties([
+    parameters([
+        choice(
+            name: 'WIN_ARCH',
+            choices: ['64-bit', '32-bit'],
+            description: 'Windows architecture. 32-bit only supports Windows 10, Server 2012 R2, and Server 2016. See: https://www.watchguard.com/support/release-notes/Cloud/Content/en-US/AuthPoint/OS-compatibility_authpoint.html'
+        ),
+        choice(
+            name: 'OS_VERSION',
+            choices: [
+                'Windows 10',
+                'Windows 11',
+                'Windows Server 2019',
+                'Windows Server 2022',
+                'Windows Server 2025',
+                'Windows Server 2016',
+                'Windows Server 2012 R2',
+            ],
+            description: 'Target Windows OS version under test. Not all versions support 32-bit — see WIN_ARCH note.'
+        ),
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['QA', 'STAGING', 'PROD'],
+            description: 'Target runtime environment. PROD requires REGION to be set explicitly.'
+        ),
+        choice(
+            name: 'REGION',
+            choices: ['USA', 'JPN', 'DEU'],
+            description: 'Geographic region for the target stack. Relevant for PROD and multi-region QA runs.'
+        ),
+        choice(
+            name: 'SUITE',
+            choices: ['SMOKE', 'REGRESSION'],
+            description: 'Test suite scope. SMOKE = quick sanity; REGRESSION = full functional coverage.'
+        ),
+        string(
+            name: 'BRANCH',
+            defaultValue: 'master',
+            description: 'Git branch of the Logon App test repository to check out.'
+        ),
+        booleanParam(
+            name: 'PUBLISH_TESTRAIL',
+            defaultValue: false,
+            description: 'When true, upload JUnit results to TestRail after execution. Requires LOGON_WIN product type in testrail_mapping.py.'
+        ),
+        string(
+            name: 'MAILTO',
+            defaultValue: '',
+            description: 'Comma-separated list of email recipients for failure notifications. Leave empty to skip email.'
+        ),
+    ])
+])
+
+runLogonTests(AGENT_LABEL)

@@ -8,6 +8,7 @@ def runCaseOnLinux(Node, remoteIP='') {
             sh "sudo rm -rf *"
         }
 
+<<<<<<< HEAD
         stage("Job creation") {
             script {
                 if (params.Environment == "prod") {
@@ -112,11 +113,46 @@ def runCaseOnLinux(Node, remoteIP='') {
                         allure report: 'allure-reports', results: [[path: 'allure*']]
                     } catch(e) {
                         println e
+=======
+    environment {
+        CI = 'true'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                bat '''
+                    node --version
+                    npm --version
+                    npm ci
+                    npm run build
+                '''
+            }
+        }
+        stage('Run Tests') {
+            parallel {
+                stage('Test') {
+                    steps {
+                        bat '''
+                            npm test -- --passWithNoTests
+                        '''
+                    }
+                }
+
+                stage('E2E') {
+                    steps {
+                        bat '''
+                            npm install serve
+                            npx playwright install chromium
+                            npx playwright test --reporter=html
+                        '''
+>>>>>>> d0b5f6a12cf4e399655d3342326d4c4727755366
                     }
                 }
             }
         }
 
+<<<<<<< HEAD
         stage('Publish JUnit Results') {
             junit allowEmptyResults: true, testResults: 'target/*.xml'
         }
@@ -173,6 +209,11 @@ def runCaseOnLinux(Node, remoteIP='') {
                         }
                     }
                 }
+=======
+        stage('Deploy') {
+            steps {
+                bat 'echo "Deploying application..."'
+>>>>>>> d0b5f6a12cf4e399655d3342326d4c4727755366
             }
         }
 
@@ -199,6 +240,17 @@ def runCaseOnLinux(Node, remoteIP='') {
             ])
         }
     }
+<<<<<<< HEAD
 }
 }
 runCaseOnLinux(AGENT_LABEL)
+=======
+
+    post {
+        always {
+            junit testResults: 'test-results/*.xml', allowEmptyResults: true
+            publishHTML([allowMissing: false, alwaysLinkToLastBuild: false, icon: '', keepAll: false, reportDir: 'playwright-report', reportFiles: 'index.html', reportName: 'Playwright HTML Report', reportTitles: '', useWrapperFileDirectly: true])
+        }
+    }
+}
+>>>>>>> d0b5f6a12cf4e399655d3342326d4c4727755366
