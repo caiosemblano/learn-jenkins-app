@@ -1,0 +1,256 @@
+/*
+ * AuthPoint Gateway Agent — Jenkins Pipeline
+ *
+ * Product   : AuthPoint Gateway (on-premise agent)
+ * Job       : AGENT_AUTOMATION/job/gateway_auto
+ * Controller: https://jenkins.infra.int.daas-watchguard.com/team-qa
+ *
+ * Reference : .cursor/skills/jenkins-standard-test-pipeline-prompt/gateway_auto_reference.md
+ * Source lib: Team-QA/Tools / gateway_agent_automation/gateway_lib.ps1
+ *
+ * Parameters
+ * ----------
+ * INSTALLER_URL      (string)  : Artifactory URL of the Gateway Agent .msi installer
+ * ENVIRONMENT_TYPE   (choice)  : QA | STAGING | PROD
+ * ENVIRONMENT_REGION (choice)  : USA | DEU | JPN
+ *   Region coupling:  QA → USA only  |  STAGING → DEU only  |  PROD → JPN | DEU | USA
+ * INSTALLATION_MODE  (choice)  : FRESH_INSTALL | UPGRADE
+ * SUITE              (choice)  : SMOKE_TEST | REGRESSION
+ * TOOLS_BRANCH       (string)  : Team-QA/Tools git branch (default: master)
+ * WINDOWS_SERVER     (choice)  : 2022 | 2019 | 2016
+ * JAVA_VERSION       (choice)  : Amazon Corretto 15 | 11 | 8  |  Oracle JDK 15 | 11
+ *
+ * Agent notes
+ * -----------
+ * - master node orchestrates setup/publish stages
+ * - WServer2016 (Windows agent with JNLP / IcedTea Web Start) runs the test stages
+ *   NOTE: JNLP launch is required — AutoIt GUI automation does NOT work when Jenkins
+ *         runs as a Windows Service. See Confluence AUTH/28149269 for details.
+ * - TODO (2): Map WINDOWS_SERVER parameter to distinct agent labels (WServer2022, WServer2019)
+ *             once those VMs are registered in Jenkins.
+ *
+ * SUITE coverage
+ * --------------
+ * SMOKE_TEST  → gateway install → service check → Newman GatewaySmokeTest.json
+ *               + JMeter radius authentication test
+ * REGRESSION  → same as SMOKE_TEST + full coverage:
+ *               GMM (creation, OTT, enrollment, GET V2/V3),
+ *               LDAP (connectivity, advanced query, group sync),
+ *               Quarantine flow, On-Premise agent, Authentication (SAML/Radius/LDAP)
+ *               TODO (3): regression Newman collections must be added to gateway_lib.ps1
+ */
+
+pipeline {
+    agent { label 'master' }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        skipDefaultCheckout(true)
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    parameters {
+        string(
+            defaultValue: 'http://tools.artifactory.infra.int.daas-watchguard.com/artifactory/authpoint-onpremise-agents/AuthPoint_Gateway-7.1.2-600.msi',
+            description: 'Artifactory URL of the Gateway Agent .msi installer',
+            name: 'INSTALLER_URL'
+        )
+        choice(
+            choices: ['QA', 'STAGING', 'PROD'],
+            description: 'Target WatchGuard Cloud environment tier. Drives region coupling: QA=USA only | STAGING=DEU only | PROD=any region',
+            name: 'ENVIRONMENT_TYPE'
+        )
+        choice(
+            choices: ['USA', 'DEU', 'JPN'],
+            description: 'Geographic region of the target stack. Must match environment: QA→USA only | STAGING→DEU only | PROD→any',
+            name: 'ENVIRONMENT_REGION'
+        )
+        choice(
+            choices: ['FRESH_INSTALL', 'UPGRADE'],
+            description: 'FRESH_INSTALL: clean snapshot install. UPGRADE: installs base version then applies upgrade via AutoIt.',
+            name: 'INSTALLATION_MODE'
+        )
+        choice(
+            choices: ['SMOKE_TEST', 'REGRESSION'],
+            description: 'SMOKE_TEST: Newman GatewaySmokeTest + JMeter radius auth. REGRESSION: full coverage suite (requires additional collections in gateway_lib.ps1).',
+            name: 'SUITE'
+        )
+        string(
+            defaultValue: 'master',
+            description: 'Team-QA/Tools git branch',
+            name: 'TOOLS_BRANCH'
+        )
+        choice(
+            choices: ['2022', '2019', '2016'],
+            description: 'Windows Server version for the test VM',
+            name: 'WINDOWS_SERVER'
+        )
+        choice(
+            choices: ['Amazon Corretto 15', 'Amazon Corretto 11', 'Amazon Corretto 8', 'Oracle JDK 15', 'Oracle JDK 11'],
+            description: 'Java runtime on the agent VM. Gateway agent requires Java 8+.',
+            name: 'JAVA_VERSION'
+        )
+    }
+
+    stages {
+
+        stage('validate parameters') {
+            agent { label 'master' }
+            steps {
+                script {
+                    // Region-environment coupling — QA and STAGING have a fixed region; PROD accepts all three.
+                    if (params.ENVIRONMENT_TYPE == 'QA' && params.ENVIRONMENT_REGION != 'USA') {
+                        error("Invalid combination: ENVIRONMENT_TYPE=QA only supports ENVIRONMENT_REGION=USA. Got: ${params.ENVIRONMENT_REGION}")
+                    }
+                    if (params.ENVIRONMENT_TYPE == 'STAGING' && params.ENVIRONMENT_REGION != 'DEU') {
+                        error("Invalid combination: ENVIRONMENT_TYPE=STAGING only supports ENVIRONMENT_REGION=DEU. Got: ${params.ENVIRONMENT_REGION}")
+                    }
+                    // PROD supports JPN, DEU, USA — no restriction
+                    echo "Parameters validated: ${params.ENVIRONMENT_TYPE} / ${params.ENVIRONMENT_REGION} / ${params.INSTALLATION_MODE} / ${params.SUITE}"
+                }
+            }
+        }
+
+        stage('setup vm') {
+            agent { label 'master' }
+            steps {
+                script {
+                    def installerVersion = parseUrl(params.INSTALLER_URL)
+                    currentBuild.displayName = "#${BUILD_NUMBER} | ${installerVersion} | ${params.ENVIRONMENT_TYPE} | ${params.ENVIRONMENT_REGION} | ${params.INSTALLATION_MODE} | ${params.SUITE}"
+                }
+                disconnectWindowsAgent()
+                // TODO (1): Parameterize VM name based on WINDOWS_SERVER value once a naming convention
+                //           is established for WServer2019 and WServer2022 VMs in the vSphere Toronto Lab.
+                //           Example: vm: "WServer${params.WINDOWS_SERVER}_<ip>"
+                vSphere buildStep: [$class: 'RevertToSnapshot', snapshotName: 'SlaveState', vm: 'WServer2016_118.30'], serverName: 'Toronto Lab'
+            }
+        }
+
+        stage('clone git project') {
+            // TODO (2): Replace hardcoded agent label with a label derived from WINDOWS_SERVER
+            //           (e.g. WServer2022, WServer2019, WServer2016) once those agents are
+            //           registered in Jenkins and the vSphere VM name is also parameterized.
+            agent { label 'WServer2016' }
+            steps {
+                dir('scripts') {
+                    git(
+                        url: 'https://github.infra.int.daas-watchguard.com/Team-QA/Tools.git',
+                        branch: params.TOOLS_BRANCH,
+                        credentialsId: 'GitCredentials'
+                    )
+                }
+            }
+        }
+
+        stage('install agent & run tests') {
+            agent { label 'WServer2016' }
+            steps {
+                dir('scripts') {
+                    withEnv([
+                        "tools_branch=${params.TOOLS_BRANCH}",
+                        "installer_url=${params.INSTALLER_URL}",
+                        "environment_type=${params.ENVIRONMENT_TYPE}",
+                        "installation_mode=${params.INSTALLATION_MODE}",
+                        "environment_region=${params.ENVIRONMENT_REGION}",
+                        "suite=${params.SUITE}"
+                        // TODO (5): Add "java_version=${params.JAVA_VERSION}" here once a VM setup stage
+                        //           (or per-Java-version snapshot) is in place to honour this parameter.
+                        //           Currently Chocolatey installs jdk8 regardless of JAVA_VERSION.
+                    ]) {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            powershell '''
+                                . $pwd\\gateway_agent_automation\\gateway_lib.ps1
+
+                                if ($env:suite -eq "SMOKE_TEST") {
+                                    run_smoke_test `
+                                        $env:environment_type `
+                                        $env:environment_region `
+                                        $env:installation_mode `
+                                        $env:installer_url `
+                                        "true"
+                                } elseif ($env:suite -eq "REGRESSION") {
+                                    run_smoke_test `
+                                        $env:environment_type `
+                                        $env:environment_region `
+                                        $env:installation_mode `
+                                        $env:installer_url `
+                                        "false"
+                                    # TODO (3): Add regression-specific Newman collection calls here.
+                                    # Required coverage (see gateway_auto_reference.md §8):
+                                    #   GMM: gateway creation, OTT generation, platform enrollment, GET V2/V3
+                                    #   LDAP: connectivity test, advanced query, group sync (including external)
+                                    #   Quarantine: active↔quarantine transitions, IdP auth positive/negative
+                                    #   On-Premise: IoT connection, Radius server auth, Get Config
+                                    #   Authentication: SAML + Radius PAP + LDAP, user caching in AOM
+                                    # Example once collections are added to gateway_lib.ps1:
+                                    #   run_newman_regression $env:environment_type $env:environment_region ...
+                                }
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('publish report') {
+            agent { label 'WServer2016' }
+            steps {
+                dir('scripts') {
+                    allure([[path: 'allure-results']])
+                    archiveArtifacts artifacts: 'backup_files\\*'
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Pipeline failed. Check Allure report and archived backup_files for gateway logs, .jks, .properties, and .mv.db files."
+        }
+        always {
+            echo "Build: ${currentBuild.displayName} | Result: ${currentBuild.currentResult}"
+        }
+    }
+}
+
+// Disconnects the Windows agent so the vSphere snapshot revert can complete cleanly.
+// TODO (2): Update node name to match WINDOWS_SERVER parameter once multiple Windows
+//           agents are registered (WServer2022, WServer2019, WServer2016).
+def disconnectWindowsAgent() {
+    Jenkins.instance.getNode('WServer2016').getComputer().disconnect()
+}
+
+// Extracts the filename from an Artifactory URL (last path segment) for use in the build display name.
+def parseUrl(String url) {
+    def parts = url.tokenize('/')
+    return parts[parts.size() - 1]
+}
+
+/*
+ * OPEN ITEMS SUMMARY
+ * ------------------
+ * (1) VM naming per WINDOWS_SERVER:
+ *     The vSphere VM name is hardcoded as 'WServer2016_118.30'. A naming convention must
+ *     be established for WServer2019 and WServer2022 VMs before this parameter drives actual
+ *     VM selection.
+ *
+ * (2) Agent label per WINDOWS_SERVER:
+ *     All test stages use 'WServer2016'. Labels WServer2019 and WServer2022 must be registered
+ *     in Jenkins (JNLP agents launched via IcedTea Web Start, NOT as Windows Services) and
+ *     disconnectWindowsAgent() must target the correct node.
+ *
+ * (3) REGRESSION suite collections:
+ *     gateway_lib.ps1 only implements the SMOKE_TEST flow. Full regression coverage (GMM,
+ *     LDAP, Quarantine, On-Premise, Authentication) requires adding Newman collection calls
+ *     to the library or a new dedicated regression function.
+ *
+ * (4) UPGRADE flow — second installer URL:
+ *     upgrade_gateway() in gateway_lib.ps1 uses $target_installer_url from its global scope.
+ *     If the upgrade target differs from the base INSTALLER_URL, a second parameter
+ *     TARGET_INSTALLER_URL should be added to this pipeline.
+ *
+ * (5) JAVA_VERSION wiring:
+ *     The JAVA_VERSION parameter is declared but not passed to the VM. The Chocolatey setup
+ *     script (setup_generic_vm.ps1) installs jdk8 regardless. A VM setup stage or per-Java
+ *     snapshot strategy is required to honour this parameter at runtime.
+ */
