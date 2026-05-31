@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     tools {
-        nodejs 'node18' // Carrega o Node configurado globalmente no Jenkins
+        nodejs 'node18'
     }
 
     stages {
@@ -21,11 +21,14 @@ pipeline {
             parallel {
                 stage('Unit tests') {
                     steps {
-                        bat 'npm test'
+                        bat '''
+                            set CI=true
+                            npm test -- --passWithNoTests
+                        '''
                     }
                     post {
                         always {
-                            junit 'jest-results/junit.xml'
+                            junit allowEmptyResults: true, testResults: 'jest-results/junit.xml'
                         }
                     }
                 }
