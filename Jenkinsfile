@@ -1,16 +1,14 @@
 pipeline {
     agent any
 
+    tools {
+        nodejs 'node18' // Carrega o Node configurado globalmente no Jenkins
+    }
+
     stages {
         stage('Build') {
-            agent {
-                docker {
-                    image 'node:18-alpine'
-                    reuseNode true
-                }
-            }
             steps {
-                sh '''
+                bat '''
                     node --version
                     npm --version
                     npm ci
@@ -22,14 +20,8 @@ pipeline {
         stage('Tests') {
             parallel {
                 stage('Unit tests') {
-                    agent {
-                        docker {
-                            image 'node:18-alpine'
-                            reuseNode true
-                        }
-                    }
                     steps {
-                        sh 'npm test'
+                        bat 'npm test'
                     }
                     post {
                         always {
@@ -39,17 +31,11 @@ pipeline {
                 }
 
                 stage('E2E') {
-                    agent {
-                        docker {
-                            image 'mcr.microsoft.com/playwright:v1.39.0-jammy'
-                            reuseNode true
-                        }
-                    }
                     steps {
-                        sh '''
+                        bat '''
                             npm install serve
-                            node_modules/.bin/serve -s build &
-                            sleep 10
+                            start /B node_modules\\.bin\\serve -s build
+                            timeout /t 10
                             npx playwright test --reporter=html
                         '''
                     }
@@ -72,16 +58,10 @@ pipeline {
         }
 
         stage('Deploy') {
-            agent {
-                docker {
-                    image 'node:18-alpine'
-                    reuseNode true
-                }
-            }
             steps {
-                sh '''
+                bat '''
                     npm install netlify-cli
-                    node_modules/.bin/netlify --version
+                    node_modules\\.bin\\netlify --version
                 '''
             }
         }
